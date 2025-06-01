@@ -2,6 +2,8 @@
 
 **AutoLogin4HENU** 是一个针对河大（以及类似学校）校园网自动登录的脚本，适用于 OpenWrt 的BusyBox，你也可以在任何其他的 Linux 发行版使用它（需要有 curl、grep、sed、awk 等工具）。该脚本通过自动化操作，检测并处理校园网认证过程，让用户无需手动登录，轻松连接校园网络。
 
+# **使用前请确保你已经仔细阅读本文档末的免责声明部分**
+
 ## 功能
 
 - **自动检测**：检测是否为未登录状态（被重定向到认证页面）。
@@ -14,7 +16,7 @@
 1. **将脚本上传到路由器**
 
    使用 SCP 或 WinSCP 上传脚本到路由器的 `/usr/bin/campus_auth.sh`。
-   可使用 curl -s 
+   可使用 `curl -o /usr/bin/campus_auth.sh https://raw.githubusercontent.com/SnowSwordScholar/AutoLogin4HENU/refs/heads/main/campus_auth.sh`
 
    ```bash
    chmod +x /usr/bin/campus_auth.sh
@@ -30,10 +32,11 @@
 
    示例配置文件：
 
+   `vi /etc/campus_auth.env`
    ```ini
    USERNAME=2023123456
    PASSWORD=your_password
-   OP_SUFFIX=@henuyd     # 如果是校园运营商，默认为 @henuyd
+   OP_SUFFIX=@henuyd     # 如果是校园运营商，默认为 @henuyd （henu移动）
    MODE=debug           # 可选值：debug 或 production
    ```
 
