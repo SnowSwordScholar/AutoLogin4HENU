@@ -71,17 +71,41 @@ fi
 # ---------- 判断是否重定向 ---------------------------------------------
 detect_captive() {
   hdr_file=$(mktemp)
-  curl -s -k -o /dev/null -D "$hdr_file" "$CAPTIVE_TEST_URL"
+  body_file=$(mktemp)
+  
+  # 添加 --noproxy "*" 以绕过本地代理，防止返回错误的“已在线”状态
+  curl --noproxy "*" -s -k -D "$hdr_file" -o "$body_file" "$CAPTIVE_TEST_URL"
 
   status=$(awk '/^HTTP/{code=$2}END{print code}' "$hdr_file")
   location=$(awk 'tolower($1)=="location:"{print $2}' "$hdr_file" | tr -d '\r')
+  # 检查响应体是否包含 "success"
+  is_success=$(grep -o "success" "$body_file" || true)
 
-  rm -f "$hdr_file"
+  # 逻辑：
+  # 1. 3xx 重定向 -> 需要登录（返回 Location）
+  # 2. 200 OK 且 响应体为 "success" -> 已在线（返回空字符串）
+  # 3. 200 OK 但 响应体不是 "success" -> 被劫持（尝试提取认证 URL）
+  # 4. 其他（curl 失败，5xx等） -> 尝试提取 URL 或 返回空
 
-  case "$status" in
-    30[1-3]|307|308) echo "$location" ;;   # 返回重定向地址 ⇒ 需登录
-    *)               echo ""          ;;   # 已在线
-  esac
+  if echo "$status" | grep -qE "30[1-3]|307|308"; then
+      echo "$location"
+  elif [ "$status" = "200" ] && [ "$is_success" = "success" ]; then
+      echo "" 
+  else
+      # 尝试从被劫持页面提取 URL（查找 wlanuserip）
+      extracted_url=$(grep -oE "http://[^'\" ]+" "$body_file" | grep "wlanuserip" | head -n 1)
+      if [ -z "$extracted_url" ]; then
+          # 备选方案：如果未找到特定参数，抓取第一个 http 链接；如果完全失败则返回空
+          extracted_url=$(grep -oE "http://[^'\" ]+" "$body_file" | head -n 1)
+      fi
+      
+      # 如果仍然没有获取到内容（例如严格的防火墙阻止了一切），
+      # 返回空会让 main() 误认为“已在线”。
+      # 但通常强制门户（Captive Portal）会返回一些内容。
+      echo "$extracted_url"
+  fi
+
+  rm -f "$hdr_file" "$body_file"
 }
 
 # ---------- 解析 portalReceiveAction 参数 ----------------------------------
@@ -144,7 +168,8 @@ quick_auth() {
   ts=$(ms_epoch)
   uuid=$(rand_uuid)
 
-  local qurl="http://$host/quickauth.do?userid=$(urlencode "${USERNAME}${OP_SUFFIX}")&passwd=$(urlencode "$PASSWORD")&wlanuserip=$ip&wlanacname=$acname&wlanacIp=$wlanacIp&ssid=&vlan=&mac=&version=0&portalpageid=4&timestamp=$ts&uuid=$uuid&portaltype=0&hostname=&bindCtrlId="
+  # 修改 portalpageid=9 以匹配浏览器抓包参数（原为 4导致被拒绝）
+  local qurl="http://$host/quickauth.do?userid=$(urlencode "${USERNAME}${OP_SUFFIX}")&passwd=$(urlencode "$PASSWORD")&wlanuserip=$ip&wlanacname=$acname&wlanacIp=$wlanacIp&ssid=&vlan=&mac=&version=0&portalpageid=9&timestamp=$ts&uuid=$uuid&portaltype=0&hostname=&bindCtrlId="
 
   log "→ quickauth: $qurl"
   curl -k -s \
@@ -174,18 +199,46 @@ EOF
   log "check_api=$check_api"
 
   # check-only（失败继续）
-  check_only "$check_api" || true
+  # check_only "$check_api" || true
 
   # auth
   school_codes=$(echo "$auth_api" | grep -oE '[a-f0-9]{32},[a-f0-9]{32}' \
                  || echo "92c8c96e4c37100777c7190b76d28233,07cdfd23373b17c6b337251c22b7ea57")
-  do_auth "$auth_api" "$school_codes"
+  # do_auth "$auth_api" "$school_codes"
 
   # quickauth
-  quick_auth "$portal_host" "$wlanuserip" "$wlanacname"
+  # quick_auth "$portal_host" "$wlanuserip" "$wlanacname"
 
-  # 再检测
-  [ -z "$(detect_captive)" ] && log "✔ 认证成功" || log "✘ 仍被劫持"
+  # 循环重试机制（解决 "limit exceed" 需要两次运行的问题）
+  MAX_RETRIES=2
+  i=1
+  while [ $i -le $MAX_RETRIES ]; do
+      log "--- 尝试认证 ($i/$MAX_RETRIES) ---"
+
+      check_only "$check_api" || true
+      do_auth "$auth_api" "$school_codes"
+      
+      # 某些情况（如 limit exceed）可能需要一点延迟让服务端状态同步
+      sleep 1 
+      quick_auth "$portal_host" "$wlanuserip" "$wlanacname"
+
+      # 检测结果
+      sleep 2
+      if [ -z "$(detect_captive)" ]; then
+          log "✔ 认证成功"
+          return 0
+      else
+          log "✘ 尝试 $i 失败，仍被劫持"
+          if [ $i -lt $MAX_RETRIES ]; then
+              log "等待 2秒后重试..."
+              sleep 2
+          fi
+      fi
+      i=$((i + 1))
+  done
+
+  log "✘ 最终认证失败"
+  return 1
 }
 
 main "$@"
